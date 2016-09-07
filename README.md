@@ -1,6 +1,6 @@
 # Dallas DS18B20 Temperature Sensor API
 This repository contains a C API for the Dallas DS18B20 temperature sensor
-for Atmel AVR microcontrollers. Sample code is also provided to show how to
+for Raspberry Pi. Sample code is also provided to show how to
 use the API.
 
 <h3>Data Types</h3>

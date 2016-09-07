@@ -2,6 +2,8 @@
 #define __ds18b20_h__
 
 
+#include <sys/types.h>
+
 /* timers (usec) for reading and writing to DS18B20 */
 #define Tconv		750000	// maximum
 #define Tslot		60	// minimum
@@ -15,7 +17,7 @@
 #define Tpdl		60	// minimum
 #define Tread		1	// minimum
 #define Trstwait	65	// typical
-#define Twr		10	// maximum
+#define Twr		10000	// maximum
 
 /* mask and size values */
 #define DS_RES_2	0x1f
@@ -23,6 +25,7 @@
 #define DS_RES_8	0x5f
 #define DS_RES_16	0x7f
 #define SCRATCHPAD_SIZE	9
+#define MAX_GPIO	28
 
 /* error codes */
 #define EBADR		53	/* invalid port or pin */
@@ -30,24 +33,13 @@
 				/* this value needs to be outside the range 16*[-55:125] */
 
 
-/* identifiers for the I/O ports */
-typedef enum
-{
-    DS_PORT_A = 0,
-    DS_PORT_B = 1,
-    DS_PORT_C = 2,
-    DS_PORT_D = 3
-} ds_port_t;
-
+typedef u_int8_t uint8_t;
 
 typedef struct ds18b20
 {
     int8_t    present;
 
-    ds_port_t port;
     uint8_t   pin;
-    uint8_t   phigh;
-    uint8_t   plow;
 
     int8_t    tempint;
     int8_t    tempfrac;

@@ -1,34 +1,16 @@
-MCU        = attiny84
-AVRDUDEMCU = t84
-CC         = /usr/avr/bin/avr-gcc
-CFLAGS     = -Os -Wall -mcall-prologues -mmcu=$(MCU)
-INCLUDE    = -I/usr/avr/include
-LIBS       = -lds18b20
-OBJ2HEX    = /usr/avr/bin/avr-objcopy
-AVRDUDE    = /usr/avr/bin/avrdude
-BINARYTEMP = binarytemp
-DECTEMP    = dectemp
+CC     = /usr/bin/gcc
+CFLAGS = -O2 -Wall
+LIBS   = -lds18b20
+TARGET = readtemp
 
-all:	binarytemp dectemp
+all:	$(TARGET)
 
-binarytemp:	binarytemp.o
-		$(CC) $(CFLAGS) -o $(BINARYTEMP) $(BINARYTEMP).o $(LIBS)
-		$(OBJ2HEX) -R .eeprom -O ihex $(BINARYTEMP) $(BINARYTEMP).hex
-		rm -f $(BINARYTEMP)
-
-dectemp:	dectemp.o display.o
-		$(CC) $(CFLAGS) $(INCLUDE) -o $(DECTEMP) $(DECTEMP).o display.o $(LIBS)
-		$(OBJ2HEX) -R .eeprom -O ihex $(DECTEMP) $(DECTEMP).hex
-		rm -f $(DECTEMP)
+$(TARGET):	$(TARGET).o
+		$(CC) $(CFLAGS) -o $(TARGET) $(TARGET).o $(LIBS)
 
 .c.o:
-	$(CC) $(CFLAGS) $(INCLUDE) -c $<
-
-flash:
-	sudo $(AVRDUDE) -p $(AVRDUDEMCU) -P /dev/spidev0.0 -c linuxspi -b 10000 -U flash:w:$(TARGET).hex
+	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f *.hex *.o
+	rm -f *.o
 
-tar:
-	tar -cf ds18b20_avr.tar *c *h Makefile

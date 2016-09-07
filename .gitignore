@@ -1,0 +1,9 @@
+.*
+# useful to have .gitignore in the repo
+!.gitignore
+*.o
+*.a
+*.hex
+*.tar
+rpi
+test

@@ -1,16 +1,16 @@
 /*
-** Dallas DS18B20 Temperature Sensor Library (Atmel AVR)
+** Dallas DS18B20 Temperature Sensor Library (Raspberry Pi)
 **
 ** This is a library to access the Dallas DS18B20 temperature sensor.
 ** The functions contained within this library implement the Dallas 1-Wire protocol.
-/*
-** F_CPU should be defined by source code using this library
-** If it is not defined, it will be defined with a default value of 1000000UL
-** in util/delay.h
 */
-#include <errno.h>
-#include <avr/io.h>
-#include <util/delay.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#include "gpio.h"
 #include "ds18b20.h"
 
 #define FALSE 0
@@ -49,84 +49,83 @@
 #define CRC     8
 
 
+/* I/O access */
+int mem_fd;
+void *gpio_map;
+volatile unsigned *gpio;
+
+
 /*
 ** nominally private routines
 */
 
+void _delay_us(uint delay)
+{
+    int elapsed;
+    struct timeval t1, t2;
+
+    elapsed = 0;
+    gettimeofday(&t1, NULL);
+    while (elapsed < delay)
+    {
+        gettimeofday(&t2, NULL);
+        elapsed = t2.tv_usec - t1.tv_usec;
+        if (elapsed < 0)
+            elapsed += 1000000;
+    }
+}
+
+
+int _setup_io(void)
+{
+    /* open /dev/gpiomem */
+    if ((mem_fd = open("/dev/gpiomem", O_RDWR|O_SYNC) ) < 0) {
+        printf("can't open /dev/gpiomem \n");
+        exit(-1);
+    }
+
+    /* mmap GPIO */
+    gpio_map = mmap(
+        NULL,             //Any adddress in our space will do
+        BLOCK_SIZE,       //Map length
+        PROT_READ|PROT_WRITE,// Enable reading & writting to mapped memory
+        MAP_SHARED,       //Shared with other processes
+        mem_fd,           //File to map
+        GPIO_BASE         //Offset to GPIO peripheral
+    );
+
+    close(mem_fd); //No need to keep mem_fd open after mmap
+
+    if (gpio_map == MAP_FAILED)
+        return -1;
+
+    // Always use volatile pointer!
+    gpio = (volatile unsigned *)gpio_map;
+
+    return 0;
+}
+
+
 uint8_t _reset(ds18b20_t *p)
 {
 /* return TRUE if DS18B20 device detected, FALSE if not detected */
-    ds_port_t port;
     uint8_t   pin;
-    uint8_t   plow;
-    uint8_t   phigh;
     uint8_t   dq;
 
-    port  = p->port;
-    pin   = p->pin;
-    plow  = p->plow;
-    phigh = p->phigh;
-    dq = FALSE;
+    pin = p->pin;
+    dq = 1;
 
-    /*
-    ** pull bus low for Trstl (480us)
-    ** then release and wait a bit before sampling
-    */
-    switch(port)
-    {
-#ifdef PORTA
-        case DS_PORT_A:
-            DDRA = DDRA | phigh;
-            PORTA = PORTA & plow;
-            _delay_us(Trstl);
+    // pull bus low for Trstl (480us)
+    GPIO_CLR = 1 << pin;
+    OUT_GPIO(pin);
+    _delay_us(Trstl);
 
-            DDRA = DDRA & plow;
-            _delay_us(Trstwait);
-            dq = (PINA & phigh) >> pin;
-            break;
-#endif
+    // then release and wait a bit before sampling
+    INP_GPIO(pin);
+    _delay_us(Trstwait);
+    dq = GET_GPIO(pin);
 
-#ifdef PORTB
-        case DS_PORT_B:
-            DDRB = DDRB | phigh;
-            PORTB = PORTB & plow;
-            _delay_us(Trstl);
-
-            DDRB = DDRB & plow;
-            _delay_us(Trstwait);
-            dq = (PINB & phigh) >> pin;
-            break;
-#endif
-
-#ifdef PORTC
-        case DS_PORT_C:
-            DDRC = DDRC | phigh;
-            PORTC = PORTC & plow;
-            _delay_us(Trstl);
-
-            DDRC = DDRC & plow;
-            _delay_us(Trstwait);
-            dq = (PINC & phigh) >> pin;
-            break;
-#endif
-
-#ifdef PORTD
-        case DS_PORT_D:
-            DDRD = DDRD | phigh;
-            PORTD = PORTD & plow;
-            _delay_us(Trstl);
-
-            DDRD = DDRD & plow;
-            _delay_us(Trstwait);
-            dq = (PIND & phigh) >> pin;
-            break;
-#endif
-
-        default:
-            return EBADR;
-            break;
-    }
-
+    /* need to wait the rest of the Trsth time */
     _delay_us(Trsth - Trstwait);
 
     /* DQ=LOW  <-> present (return TRUE) */
@@ -135,73 +134,16 @@ uint8_t _reset(ds18b20_t *p)
 }
 
 
-uint8_t _read_dq(ds18b20_t *p)
-{
-/* returns the DQ level - this fn allows other functions to abstract the reading */
-    ds_port_t port;
-    uint8_t   pin;
-    uint8_t   plow;
-    uint8_t   phigh;
-    uint8_t   dq;
-
-    port  = p->port;
-    pin   = p->pin;
-    plow = p->plow;
-    phigh = p->phigh;
-    dq = 0;
-
-    switch(port)
-    {
-#ifdef PORTA
-        case DS_PORT_A:
-            DDRA = DDRA & plow;
-            dq = (PINA & phigh) >> pin;
-            break;
-#endif
-
-#ifdef PORTB
-        case DS_PORT_B:
-            DDRB = DDRB & plow;
-            dq = (PINB & phigh) >> pin;
-            break;
-#endif
-
-#ifdef PORTC
-        case DS_PORT_C:
-            DDRC = DDRC & plow;
-            dq = (PINC & phigh) >> pin;
-            break;
-#endif
-
-#ifdef PORTD
-        case DS_PORT_D:
-            DDRD = DDRD & plow;
-            dq = (PIND & phigh) >> pin;
-            break;
-#endif
-
-        default:
-            break;
-    }
-
-    return dq;
-}
-
-
 uint8_t _write_byte(ds18b20_t *p, uint8_t data)
 {
 /* bytes are written LSB first */
-    ds_port_t port;
-    uint8_t   plow;
-    uint8_t   phigh;
+    uint8_t   pin;
 
     uint8_t n;
     uint8_t ch;
     uint8_t bit;
 
-    port  = p->port;
-    plow = p->plow;
-    phigh = p->phigh;
+    pin  = p->pin;
 
     ch = data;
     for (n = 0; n < 8; n++)
@@ -214,89 +156,20 @@ uint8_t _write_byte(ds18b20_t *p, uint8_t data)
             ** write 0
             ** pull bus low for Tlow0 (60us) then release
             */
-            switch(port)
-            {
-#ifdef PORTA
-                case DS_PORT_A:
-                    DDRA = DDRA | phigh;
-                    PORTA = PORTA & plow;
-                    _delay_us(Tlow0);
-                    DDRA = DDRA & plow;
-                    break;
-#endif
-#ifdef PORTB
-                case DS_PORT_B:
-                    DDRB = DDRB | phigh;
-                    PORTB = PORTB & plow;
-                    _delay_us(Tlow0);
-                    DDRB = DDRB & plow;
-                    break;
-#endif
-#ifdef PORTC
-                case DS_PORT_C:
-                    DDRC = DDRC | phigh;
-                    PORTC = PORTC & plow;
-                    _delay_us(Tlow0);
-                    DDRC = DDRC & plow;
-                    break;
-#endif
-#ifdef PORTD
-                case DS_PORT_D:
-                    DDRD = DDRD | phigh;
-                    PORTD = PORTD & plow;
-                    _delay_us(Tlow0);
-                    DDRD = DDRD & plow;
-                    break;
-#endif
-                default:
-                    break;
-            }
+            GPIO_CLR = 1 << pin;
+            OUT_GPIO(pin);
+            _delay_us(Tlow0);
+            INP_GPIO(pin);
         }
         else
         {
             /* write 1 */
             /* pull bus low for Tlow1, then release and wait rest of slot */
-            switch(port)
-            {
-#ifdef PORTA
-                case DS_PORT_A:
-                    DDRA = DDRA | phigh;
-                    PORTA = PORTA & plow;
-                    _delay_us(Tlow1);
-                    DDRA = DDRA & plow;
-                    _delay_us(Tslot - Tlow1);
-                    break;
-#endif
-#ifdef PORTB
-                case DS_PORT_B:
-                    DDRB = DDRB | phigh;
-                    PORTB = PORTB & plow;
-                    _delay_us(Tlow1);
-                    DDRB = DDRB & plow;
-                    _delay_us(Tslot - Tlow1);
-                    break;
-#endif
-#ifdef PORTC
-                case DS_PORT_C:
-                    DDRC = DDRC | phigh;
-                    PORTC = PORTC & plow;
-                    _delay_us(Tlow1);
-                    DDRC = DDRC & plow;
-                    _delay_us(Tslot - Tlow1);
-                    break;
-#endif
-#ifdef PORTD
-                case DS_PORT_D:
-                    DDRD = DDRD | phigh;
-                    PORTD = PORTD & plow;
-                    _delay_us(Tlow1);
-                    DDRD = DDRD & plow;
-                    _delay_us(Tslot - Tlow1);
-                    break;
-#endif
-                default:
-                    break;
-            }
+            GPIO_CLR = 1 << pin;
+            OUT_GPIO(pin);
+            _delay_us(Tlow1);
+            INP_GPIO(pin);
+            _delay_us(Tslot - Tlow1);
         }
 
         /* must wait Trec time after each bit is transmitted */
@@ -309,24 +182,48 @@ uint8_t _write_byte(ds18b20_t *p, uint8_t data)
 }
 
 
-uint8_t _read_byte(ds18b20_t *p)
+uint8_t _read_bit(ds18b20_t *p)
 {
-    ds_port_t port;
-    uint8_t   pin;
-    uint8_t   plow;
-    uint8_t   phigh;
 
     int     n;
+    uint8_t pin;
     uint8_t ch;
-    uint8_t data;
-    uint8_t dq;
 
     pin  = p->pin;
-    port  = p->port;
-    plow = p->plow;
-    phigh = p->phigh;
 
-    dq = 0;
+    ch = 0;
+
+    /*
+    ** read slot; pull bus low for Tread (1us)
+    ** then release and wait a bit before sampling
+    ** should sample close to but before expiration of Trdv
+    */
+    GPIO_CLR = 1 << pin;
+    OUT_GPIO(pin);
+    _delay_us(Tread);
+
+    INP_GPIO(pin);
+    _delay_us(Trdv - Tread - 1);
+    ch = GET_GPIO(pin);
+
+    /* then wait the rest of slot + recovery time */
+    _delay_us(Tslot - Trdv + 1 + Trec);
+
+    return ch;
+}
+
+
+
+uint8_t _read_byte(ds18b20_t *p)
+{
+
+    int     n;
+    uint8_t pin;
+    uint8_t ch;
+    uint8_t data;
+
+    pin  = p->pin;
+
     ch = 0;
     data = 0;
 
@@ -337,62 +234,19 @@ uint8_t _read_byte(ds18b20_t *p)
         ** then release and wait a bit before sampling
         ** should sample close to but before expiration of Trdv
         */
-        switch(port)
-        {
-#ifdef PORTA
-            case DS_PORT_A:
-                DDRA = DDRA | phigh;
-                PORTA = PORTA & plow;
-                _delay_us(Tread);
+        GPIO_CLR = 1 << pin;
+        OUT_GPIO(pin);
+        _delay_us(Tread);
 
-                DDRA = DDRA & plow;
-                _delay_us(Trdv - Tread - 1);
-                dq = (PINA & phigh) >> pin;
-                break;
-#endif
-#ifdef PORTB
-            case DS_PORT_B:
-                DDRB = DDRB | phigh;
-                PORTB = PORTB & plow;
-                _delay_us(Tread);
-
-                DDRB = DDRB & plow;
-                _delay_us(Trdv - Tread - 1);
-                dq = (PINB & phigh) >> pin;
-                break;
-#endif
-#ifdef PORTC
-            case DS_PORT_C:
-                DDRC = DDRC | phigh;
-                PORTC = PORTC & plow;
-                _delay_us(Tread);
-
-                DDRC = DDRC & plow;
-                _delay_us(Trdv - Tread - 1);
-                dq = (PINC & phigh) >> pin;
-                break;
-#endif
-#ifdef PORTD
-            case DS_PORT_D:
-                DDRD = DDRD | phigh;
-                PORTD = PORTD & plow;
-                _delay_us(Tread);
-
-                DDRD = DDRD & plow;
-                _delay_us(Trdv - Tread - 1);
-                dq = (PIND & phigh) >> pin;
-                break;
-#endif
-
-            default:
-                break;
-        }
-
-        ch = dq << n;
-        data |= ch;
+        INP_GPIO(pin);
+        _delay_us(Trdv - Tread - 1);
+        ch = GET_GPIO(pin);
 
         /* then wait the rest of slot + recovery time */
-        _delay_us(Tslot - Trdv + Tread + 1 + Trec);
+        _delay_us(Tslot - Trdv + 1 + Trec);
+
+        ch = ch << n;
+        data |= ch;
     }
 
     return data;
@@ -407,71 +261,18 @@ uint8_t _read_byte(ds18b20_t *p)
 uint8_t ds18b20_init(ds18b20_t *p)
 {
 /* struct *p must have port and pin values set before this function is called */
-    uint8_t max[4] = {7, 7, 6, 7};
+    uint8_t pin;
 
-    /*
-    ** after we configure mask values phigh and plow, we can use them as follows:
-    **   (DDR | phigh) to set pin direction as output
-    **   (PORT | phigh) to set pin level high
-    **   (DDR & plow) to set pin direction as input
-    **   (PORT & plow) to set pin level low
-    */
-    p->phigh = (1 << p->pin);
-    p->plow = ~p->phigh;
-
+    _setup_io();
     p->configvalid = FALSE;
     p->present = FALSE;
 
-    switch(p->port)
-    {
-#ifdef PORTA
-        /* port A */
-        case DS_PORT_A:
-            if (p->pin > max[DS_PORT_A])
-                return EBADR;
+    pin = p->pin;
 
-            break;
-#endif /* PORTA */
+    if (pin >= MAX_GPIO)
+        return -1;
 
-#ifdef PORTB
-        /* port B */
-        case DS_PORT_B:
-#ifdef _AVR_IOTN84_H_
-            max[DS_PORT_B] = 3;
-#endif /* _AVR_IOTN84_H_ */
-#ifdef _AVR_IOTN85_H_
-            max[DS_PORT_B] = 5;
-#endif /* _AVR_IOTN85_H_ */
-
-            if (p->pin > max[DS_PORT_B])
-                return EBADR;
-
-            break;
-#endif /* PORTB */
-
-#ifdef PORTC
-        /* port C */
-        case DS_PORT_C:
-            if (p->pin > max[DS_PORT_C])
-                return EBADR;
-
-            break;
-#endif
-
-#ifdef PORTD
-        /* port D */
-        case DS_PORT_D:
-            if (p->pin > max[DS_PORT_D])
-                return EBADR;
-
-            break;
-#endif
-
-        /* invalid port */
-        default:
-            return EBADR;
-            break;
-    }
+    INP_GPIO(pin);
 
     p->present = _reset(p);
     return p->present;
@@ -502,7 +303,7 @@ int16_t ds18b20_read_temperature(ds18b20_t *p)
     for (n = 0; n < 8 && dq == 0; n++)
     {
         _delay_us(Tconv / 8);
-        dq = _read_dq(p);
+        dq = _read_bit(p);
     }
 
     /* now send reset, SKIP_ROM, READ_SCRATCHPAD */

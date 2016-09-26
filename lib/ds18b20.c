@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include "gpio.h"
 #include "ds18b20.h"
+#include "crc1w.h"
 
 #define FALSE 0
 #define TRUE  1
@@ -47,6 +48,12 @@
 // reserved     6
 // reserved     7
 #define CRC     8
+
+#define MAX_RETRIES 2
+
+
+/* mask values to filter out higher resolution bits */
+const uint8_t fmask[4] = {0x08, 0x0c, 0x0e, 0x0f};
 
 
 /* I/O access */
@@ -203,11 +210,11 @@ uint8_t _read_bit(ds18b20_t *p)
     _delay_us(Tread);
 
     INP_GPIO(pin);
-    _delay_us(Trdv - Tread - 1);
+    _delay_us(Trdv - Tread - 2);
     ch = GET_GPIO(pin);
 
     /* then wait the rest of slot + recovery time */
-    _delay_us(Tslot - Trdv + 1 + Trec);
+    _delay_us(Tslot - Trdv + 2 + Trec);
 
     return ch;
 }
@@ -229,23 +236,7 @@ uint8_t _read_byte(ds18b20_t *p)
 
     for (n = 0; n < 8; n++)
     {
-        /*
-        ** read slot; pull bus low for Tread (1us)
-        ** then release and wait a bit before sampling
-        ** should sample close to but before expiration of Trdv
-        */
-        GPIO_CLR = 1 << pin;
-        OUT_GPIO(pin);
-        _delay_us(Tread);
-
-        INP_GPIO(pin);
-        _delay_us(Trdv - Tread - 1);
-        ch = GET_GPIO(pin);
-
-        /* then wait the rest of slot + recovery time */
-        _delay_us(Tslot - Trdv + 1 + Trec);
-
-        ch = ch << n;
+        ch = _read_bit(p) << n;
         data |= ch;
     }
 
@@ -267,6 +258,9 @@ uint8_t ds18b20_init(ds18b20_t *p)
     p->configvalid = FALSE;
     p->present = FALSE;
 
+    /* initialise resolution to 16 bit */
+    p->scratchpad[CONFIG] = DS_RES_16;
+
     pin = p->pin;
 
     if (pin >= MAX_GPIO)
@@ -282,84 +276,94 @@ uint8_t ds18b20_init(ds18b20_t *p)
 int16_t ds18b20_read_temperature(ds18b20_t *p)
 {
     int n;
-    uint8_t dq;
+    int attempt;
+    uint8_t crc;
     uint8_t resolution;
-    uint8_t fmask;
+    uint8_t res_index;
     uint8_t fraction;
     int8_t  tempint;
-    int16_t  temp16;
+    int16_t temp16;
 
-    /* reset */
-    p->present = _reset(p);
-    if (!p->present)
-        return ENOTPRESENT;
-
-    /* then send SKIP_ROM, CONVERT_T */
-    _write_byte(p, SKIP_ROM);
-    _write_byte(p, CONVERT_T);
-
-    /*  wait for temperature conversion to complete - max Tconv usec */
-    dq = 0;
-    for (n = 0; n < 8 && dq == 0; n++)
+    temp16 = ENAVAIL;
+    attempt = 0;
+    while (attempt < MAX_RETRIES && (temp16 < TEMP_MIN || temp16 > TEMP_MAX))
     {
-        _delay_us(Tconv / 8);
-        dq = _read_bit(p);
+        /* reset */
+        p->present = _reset(p);
+        if (!p->present)
+        {
+            temp16 = ENOTPRESENT;
+            attempt++;
+            continue;
+        }
+
+        /* then send SKIP_ROM, CONVERT_T */
+        _write_byte(p, SKIP_ROM);
+        _write_byte(p, CONVERT_T);
+
+        /*  wait time for temperature conversion is based on resolution */
+        res_index = p->scratchpad[CONFIG] / 32;
+        if (res_index > 3)
+            res_index = 3;
+        _delay_us(Tconv[res_index]);
+
+        /*  if temperature conversion is still not complete, return an error */
+        if (_read_bit(p) == 0)
+        {
+            temp16 = ENAVAIL;
+            attempt++;
+            continue;
+        }
+
+        /* now send reset, SKIP_ROM, READ_SCRATCHPAD */
+        _reset(p);
+        _write_byte(p, SKIP_ROM);
+        _write_byte(p, READ_SCRATCHPAD);
+
+        /* and read the result */
+        for (n = 0; n < SCRATCHPAD_SIZE; n++)
+            p->scratchpad[n] = _read_byte(p);
+
+        /* check if the CRC is correct */
+        crc = crc1w(SCRATCHPAD_SIZE, p->scratchpad);
+        if (crc != 0)
+        {
+            temp16 = EBADCRC;
+            attempt++;
+            continue;
+        }
+
+        /*
+        ** if the resolution is less than 1/16, there may be high res bits
+        ** left over from previous readings so we should filter them out
+        */
+        resolution = p->scratchpad[CONFIG];
+        res_index = resolution / 32;
+        if (res_index > 3)
+            res_index = 3;
+        fraction = p->scratchpad[TEMPLSB] & fmask[res_index];
+
+        /*
+        ** the integer portion of temperature fits into one byte but is
+        ** stored as 4 bits in LSB and 4 bits in MSB.
+        ** remove the fraction bits by shifting right 4 bits and then
+        ** insert the 4 bits from MSB into the tempint variable
+        */
+        tempint = p->scratchpad[TEMPLSB] >> 4;
+        tempint |= (p->scratchpad[TEMPMSB] << 4);
+
+        p->tempint = tempint;
+        p->tempfrac = fraction;
+        p->temphigh = p->scratchpad[THIGH];
+        p->templow = p->scratchpad[TLOW];
+        p->resolution = resolution;
+        p->configvalid = TRUE;
+
+        /* return the temperature expressed as multiples of 1/16th degree C */
+        temp16 = tempint * 16 + fraction;
+        attempt++;
     }
 
-    /* now send reset, SKIP_ROM, READ_SCRATCHPAD */
-    _reset(p);
-    _write_byte(p, SKIP_ROM);
-    _write_byte(p, READ_SCRATCHPAD);
-
-    /* and read the result */
-    for (n = 0; n < SCRATCHPAD_SIZE; n++)
-        p->scratchpad[n] = _read_byte(p);
-
-    /*
-    ** if the resolution is less than 1/16, there may be high res bits
-    ** left over from previous readings so we should filter them out
-    */
-    resolution = p->scratchpad[CONFIG];
-    switch(resolution)
-    {
-        case DS_RES_2:
-            fmask = 0x08;
-            break;
-
-        case DS_RES_4:
-            fmask = 0x0c;
-            break;
-
-        case DS_RES_8:
-            fmask = 0x0e;
-            break;
-
-        /* if resolution not well defined assume 1/16 */
-        case DS_RES_16:
-        default:
-            fmask = 0x0f;
-            break;
-    }
-    fraction = p->scratchpad[TEMPLSB] & fmask;
-
-    /*
-    ** the integer portion of temperature fits into one byte but is
-    ** stored as 4 bits in LSB and 4 bits in MSB.
-    ** remove the fraction bits by shifting right 4 bits and then
-    ** insert the 4 bits from MSB into the tempint variable
-    */
-    tempint = p->scratchpad[TEMPLSB] >> 4;
-    tempint |= (p->scratchpad[TEMPMSB] << 4);
-
-    p->tempint = tempint;
-    p->tempfrac = fraction;
-    p->temphigh = p->scratchpad[THIGH];
-    p->templow = p->scratchpad[TLOW];
-    p->resolution = resolution;
-    p->configvalid = TRUE;
-
-    /* return the temperature expressed as multiples of 1/16th degree C */
-    temp16 = tempint * 16 + fraction;
     return temp16;
 }
 

@@ -1,5 +1,5 @@
 CC     = /usr/bin/gcc
-CFLAGS = -O2 -Wall
+CFLAGS = -O2 -Wall -L/usr/local/lib
 LIBS   = -lds18b20
 TARGET = readtemp
 
